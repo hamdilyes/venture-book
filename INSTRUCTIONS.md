@@ -4,11 +4,11 @@ Two separate autonomous workflows. Each runs only when the user explicitly trigg
 
 ## Common rules (apply to both workflows)
 
-- **Web search query format — exact, every time:**
+- **Web search query format:**
   ```
   Fundraising rounds: <company name>
   ```
-  Nothing else. No extra keywords, no founder names, no round qualifiers.
+  Optional: append ` Kima Ventures` if the company name is generic/ambiguous (`Arrow`, `Bit`, `Asap`, `Alma`, etc.) and the plain query is likely to surface the wrong company. Use sparingly — for unique names, the suffix can suppress the right result.
 - **Trust the web search on any conflict** with the post or with the existing CSV value (amount, round, date, founders, funds, company name).
 - **Never ask the user to confirm.** Write the row, log what changed, move on.
 - **Don't fabricate.** If the web search doesn't give you enough data for a field, leave it blank rather than guess. For backfilled rows (Workflow 2), if you can't establish at least `amount_eur`, `round`, and `date` from the search, skip — don't add a partial row.

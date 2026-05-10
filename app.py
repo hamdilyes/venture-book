@@ -1,6 +1,8 @@
 import calendar
+import datetime as dt
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -181,8 +183,18 @@ def render_timeline_tab(df: pd.DataFrame) -> None:
     windows_in_data = sorted({date_to_window(d) for d in filtered["date"]})
     earliest, latest = windows_in_data[0], windows_in_data[-1]
 
-    if "window" not in st.session_state or not (earliest <= st.session_state.window <= latest):
-        st.session_state.window = latest
+    today = dt.date.today()
+    current_window = (today.year, 1 if today.month <= 6 else 2)
+    default_window = min(max(current_window, earliest), latest)
+
+    last_round = st.session_state.get("timeline_last_round")
+    if (
+        last_round != selected
+        or "window" not in st.session_state
+        or not (earliest <= st.session_state.window <= latest)
+    ):
+        st.session_state.window = default_window
+    st.session_state.timeline_last_round = selected
 
     render_nav(st.session_state.window, earliest, latest)
     render_month_columns(filtered, st.session_state.window)
@@ -269,6 +281,145 @@ def render_fund_tab(df: pd.DataFrame) -> None:
     )
 
 
+def render_orderbook_tab(df: pd.DataFrame) -> None:
+    rounds_present = [r for r in ROUND_ORDER if r in set(df["round"])]
+    extras = sorted(set(df["round"]) - set(ROUND_ORDER))
+    rounds_present.extend(extras)
+
+    if not rounds_present:
+        st.info("No fundraises yet.")
+        return
+
+    today = dt.date.today()
+
+    def months_ago(date_str: str) -> int:
+        y, m = date_str.split("-")
+        d = dt.date(int(y), int(m), 1)
+        return (today.year - d.year) * 12 + (today.month - d.month)
+
+    plot = df.copy()
+    plot["months_ago"] = plot["date"].apply(months_ago)
+    plot["amount_label"] = plot["amount_eur"].apply(format_eur)
+    plot["round_label"] = plot["round"].str.replace("-", " ").str.title()
+
+    round_labels = [r.replace("-", " ").title() for r in rounds_present]
+
+    early = plot[plot["round"].isin(["pre-seed", "seed"])]
+    early = early[early["amount_eur"] <= 50_000_000]
+    if not early.empty:
+        early_round_labels = [
+            r.replace("-", " ").title()
+            for r in ("pre-seed", "seed")
+            if r in set(early["round"])
+        ]
+        early_box = (
+            alt.Chart(early)
+            .mark_boxplot(size=80, opacity=0.35, color="#9aa0a6", outliers=False)
+            .encode(
+                x=alt.X(
+                    "round_label:N",
+                    sort=early_round_labels,
+                    title="Round",
+                    axis=alt.Axis(labelAngle=0),
+                ),
+                y=alt.Y(
+                    "amount_eur:Q",
+                    scale=alt.Scale(domain=[0, 50_000_000]),
+                    title="Amount (€)",
+                    axis=alt.Axis(format="~s"),
+                ),
+            )
+        )
+        early_dots = (
+            alt.Chart(early)
+            .transform_calculate(jitter="random()")
+            .mark_circle(size=110, opacity=0.75, color="#4f9eff", stroke="white", strokeWidth=0.5)
+            .encode(
+                x=alt.X(
+                    "round_label:N",
+                    sort=early_round_labels,
+                    title="Round",
+                    axis=alt.Axis(labelAngle=0),
+                ),
+                xOffset=alt.XOffset("jitter:Q"),
+                y=alt.Y("amount_eur:Q", scale=alt.Scale(domain=[0, 50_000_000])),
+                tooltip=[
+                    alt.Tooltip("company:N", title="Company"),
+                    alt.Tooltip("amount_label:N", title="Amount"),
+                    alt.Tooltip("round_label:N", title="Round"),
+                    alt.Tooltip("date:N", title="Date"),
+                    alt.Tooltip("funds:N", title="Funds"),
+                ],
+            )
+        )
+        early_chart = (
+            (early_box + early_dots).properties(height=420).configure_view(strokeWidth=0)
+        )
+        st.caption("Pre-seed and seed only — linear scale, capped at €50M.")
+        st.altair_chart(early_chart, use_container_width=True)
+
+    box = (
+        alt.Chart(plot)
+        .mark_boxplot(size=44, opacity=0.35, color="#9aa0a6", outliers=False)
+        .encode(
+            x=alt.X("round_label:N", sort=round_labels, title="Round", axis=alt.Axis(labelAngle=0)),
+            y=alt.Y(
+                "amount_eur:Q",
+                scale=alt.Scale(type="log"),
+                title="Amount (€)",
+                axis=alt.Axis(format="~s"),
+            ),
+        )
+    )
+
+    dots = (
+        alt.Chart(plot)
+        .transform_calculate(jitter="random()")
+        .mark_circle(size=110, opacity=0.85, stroke="white", strokeWidth=0.5)
+        .encode(
+            x=alt.X("round_label:N", sort=round_labels, title="Round", axis=alt.Axis(labelAngle=0)),
+            xOffset=alt.XOffset("jitter:Q"),
+            y=alt.Y("amount_eur:Q", scale=alt.Scale(type="log"), title="Amount (€)"),
+            color=alt.Color(
+                "months_ago:Q",
+                scale=alt.Scale(scheme="viridis", reverse=True, domain=[0, 24], clamp=True),
+                legend=alt.Legend(title="Months ago"),
+            ),
+            tooltip=[
+                alt.Tooltip("company:N", title="Company"),
+                alt.Tooltip("amount_label:N", title="Amount"),
+                alt.Tooltip("round_label:N", title="Round"),
+                alt.Tooltip("date:N", title="Date"),
+                alt.Tooltip("funds:N", title="Funds"),
+            ],
+        )
+    )
+
+    chart = (box + dots).properties(height=560).configure_view(strokeWidth=0)
+
+    st.caption(
+        "Each dot is one round. Box = P25–median–P75 per stage. "
+        "Color tracks recency (brighter = more recent). Y-axis is log scale."
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+    stage_stats = (
+        plot.groupby("round")["amount_eur"]
+        .agg(["count", "min", "median", "max"])
+        .reindex(rounds_present)
+        .dropna()
+    )
+    stage_stats = stage_stats.reset_index().rename(columns={"round": "Round"})
+    stage_stats["Round"] = stage_stats["Round"].str.replace("-", " ").str.title()
+    stage_stats["count"] = stage_stats["count"].astype(int)
+    for col in ("min", "median", "max"):
+        stage_stats[col] = stage_stats[col].apply(lambda v: format_eur(int(v)))
+    stage_stats = stage_stats.rename(
+        columns={"count": "Deals", "min": "Min", "median": "Median", "max": "Max"}
+    )
+    st.dataframe(stage_stats, use_container_width=True, hide_index=True)
+
+
 def main() -> None:
     st.set_page_config(page_title="venture-book", layout="wide")
     st.markdown(CARD_STYLES, unsafe_allow_html=True)
@@ -280,8 +431,12 @@ def main() -> None:
         st.info("No fundraises in data/fundraises.csv yet.")
         return
 
-    tab_timeline, tab_evolutions, tab_fund = st.tabs(["Timeline", "Evolutions", "Fund analysis"])
+    tab_orderbook, tab_timeline, tab_evolutions, tab_fund = st.tabs(
+        ["Order book", "Timeline", "Evolutions", "Fund analysis"]
+    )
 
+    with tab_orderbook:
+        render_orderbook_tab(df)
     with tab_timeline:
         render_timeline_tab(df)
     with tab_evolutions:
